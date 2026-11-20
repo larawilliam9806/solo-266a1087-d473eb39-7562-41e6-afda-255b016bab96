@@ -90,13 +90,14 @@ def upload():
         return redirect(url_for("index"))
 
     try:
-        definition, warnings, rows, _, _ = importer.parse(
+        definition, warnings, rows, _, _, has_refusal_col = importer.parse(
             csv_file.read(), json_file.read())
     except (importer.ImportError_, engine.DefinitionError) as error:
         flash("导入失败：%s" % error, "error")
         return redirect(url_for("index"))
 
     answers = importer.to_import_answers(definition, rows)
+    refusals = importer.to_import_refusals(rows)
     name = request.form.get("batch_name", "").strip() or \
         os.path.splitext(os.path.basename(csv_file.filename))[0]
 
@@ -105,7 +106,8 @@ def upload():
         batch_id = storage.create_batch(
             connection, name, definition,
             [(row["household_no"], row["row_number"]) for row in rows],
-            answers)
+            answers, refusals_by_household=refusals,
+            has_refusals=has_refusal_col)
     finally:
         connection.close()
 
@@ -125,7 +127,8 @@ def batch(batch_id):
     summaries = []
     for household in households:
         stored = storage.load_answers(connection, household["id"])
-        steps = engine.walk_stored(definition, stored)
+        refusals = storage.load_refusals(connection, household["id"])
+        steps = engine.walk_stored(definition, stored, refusals=refusals)
         missing = engine.first_missing(steps)
         summaries.append({
             "id": household["id"],
@@ -148,8 +151,9 @@ def household(batch_id, household_id):
         connection.close()
         abort(404)
     stored = storage.load_answers(connection, household_id)
+    refusals = storage.load_refusals(connection, household_id)
     connection.close()
-    return _render_household(info, record, stored)
+    return _render_household(info, record, stored, refusals)
 
 
 @app.post("/batch/<int:batch_id>/household/<int:household_id>")
@@ -161,12 +165,15 @@ def save_household(batch_id, household_id):
         connection.close()
         abort(404)
 
-    submitted = collect_submitted(request.form)
+    submitted, clear_refusals = collect_submitted(request.form)
     stored = storage.load_answers(connection, household_id)
+    refusals = storage.load_refusals(connection, household_id)
     try:
-        changes, ignored = engine.plan_changes(
-            info["definition"], stored, submitted)
-        storage.save_answers(connection, household_id, changes)
+        changes, ignored, refusal_changes = engine.plan_household_changes(
+            info["definition"], stored, submitted,
+            refusals=refusals, clear_refusals=clear_refusals)
+        storage.save_answers(connection, household_id, changes,
+                             refusal_changes=refusal_changes)
     except engine.DefinitionError as error:
         connection.close()
         flash("保存失败：%s（网页和下载仍显示上次保存的答卷）" % error, "error")
@@ -180,18 +187,29 @@ def save_household(batch_id, household_id):
                                 household_id=household_id))
 
     current = storage.load_answers(connection, household_id)
+    current_refusals = storage.load_refusals(connection, household_id)
     connection.close()
     if ignored:
         flash("题 %s 不在当前路径上，未保存" % "、".join(dict.fromkeys(ignored)),
               "warning")
+    if refusal_changes:
+        flash("拒答记录已处理，后答按当前路径保留或停用", "success")
     saved = sum(1 for value in changes.values() if value is not None)
-    flash("已保存 %d 处修改" % saved, "success")
-    return _render_household(info, record, current)
+    if saved:
+        flash("已保存 %d 处修改" % saved, "success")
+    elif not refusal_changes:
+        flash("没有需要保存的修改", "success")
+    return _render_household(info, record, current, current_refusals)
 
 
 def collect_submitted(form):
-    """Turn the edit form into ``[(qid, prefix, value)]`` in page order."""
+    """Turn the edit form into ``(entries, clear_refusals)``.
+
+    ``entries`` is ``[(qid, prefix, value)]`` in page order; ``clear_refusals``
+    is the set of prefixes whose refusal record was explicitly cleared.
+    """
     entries = []
+    clear_refusals = set()
     index = 1
     while ("k_qid_%d" % index) in form:
         qid = form["k_qid_%d" % index]
@@ -202,20 +220,23 @@ def collect_submitted(form):
         except (TypeError, ValueError):
             prefix = ()
         entries.append((qid, prefix, form.get("v_%d" % index, "")))
+        if form.get("r_clear_%d" % index):
+            clear_refusals.add((prefix, qid))
         index += 1
-    return entries
+    return entries, clear_refusals
 
 
-def _render_household(info, record, stored):
+def _render_household(info, record, stored, refusals=None):
     definition = info["definition"]
-    steps = engine.walk_stored(definition, stored)
+    steps = engine.walk_stored(definition, stored, refusals=refusals)
     return render_template(
         "household.html",
         batch=info,
         household=record,
         steps=steps,
         missing=engine.first_missing(steps),
-        others=engine.other_path_answers(definition, stored, steps),
+        others=engine.other_path_answers(
+            definition, stored, steps, refusals=refusals),
     )
 
 
@@ -234,11 +255,15 @@ def export_csv(batch_id):
     header = ["户号", "当前路径", "已答题数"]
     header += ["%s %s" % (qid, titles[qid]) for qid in qids]
     header += ["首个漏答题", "漏答题干"]
+    if info.get("has_refusals"):
+        header.append(importer.REFUSAL_HEADER)
     writer.writerow(header)
 
     for household in households:
         stored = storage.load_answers(connection, household["id"])
-        steps = engine.walk_stored(definition, stored)
+        refusals = (storage.load_refusals(connection, household["id"])
+                    if info.get("has_refusals") else None)
+        steps = engine.walk_stored(definition, stored, refusals=refusals)
         values = {step["qid"]: step["value"] for step in steps
                   if step["answered"]}
         missing = engine.first_missing(steps)
@@ -247,6 +272,13 @@ def export_csv(batch_id):
         row += [values.get(qid, "") for qid in qids]
         row += [missing["qid"] if missing else "",
                 missing["title"] if missing else ""]
+        if info.get("has_refusals"):
+            # Only refusals still effective on the current path are exported;
+            # dormant (bypassed) and cleared records stay blank.
+            active = next((step for step in steps if step.get("refused")),
+                          None)
+            row.append("%s>%s" % (active["qid"], active["refusal_target"])
+                       if active else "")
         writer.writerow(row)
 
     connection.close()

@@ -31,7 +31,7 @@ def parse(csv_text=CSV_TEXT, jumps=JUMPS, encoding="utf-8"):
 
 
 def test_import_uses_only_reached_answers():
-    definition, warnings, rows, _, _ = parse()
+    definition, warnings, rows, _, _, _ = parse()
     stored = importer.to_import_answers(definition, rows)
     assert [q["id"] for q in definition] == ["Q1", "Q2", "Q3", "Q4", "Q5"]
     h2 = stored["H2"]
@@ -45,40 +45,40 @@ def test_import_uses_only_reached_answers():
 
 
 def test_import_stops_at_blank():
-    definition, _, rows, _, _ = parse()
+    definition, _, rows, _, _, _ = parse()
     stored = importer.to_import_answers(definition, rows)
     assert stored["H3"] == {((), "Q1"): "自购"}  # Q2 blank stops the walk
 
 
 def test_import_tolerates_bom_and_gbk():
-    definition, _, rows, _, _ = parse(encoding="gb18030")
+    definition, _, rows, _, _, _ = parse(encoding="gb18030")
     assert [row["household_no"] for row in rows] == ["H1", "H2", "H3"]
     assert rows[0]["answers"]["Q1"] == "自购"
 
 
 def test_household_header_is_found_by_name():
     csv_text = "调查员,户号,Q1 设备来源\n张三,H9,租赁\n"
-    definition, _, rows, _, _ = parse(csv_text)
+    definition, _, rows, _, _, _ = parse(csv_text)
     assert rows[0]["household_no"] == "H9"
 
 
 def test_duplicate_households_keep_first():
     csv_text = "户号,Q1 设备来源\nH1,自购\nH1,租赁\n"
-    definition, warnings, rows, _, _ = parse(csv_text)
+    definition, warnings, rows, _, _, _ = parse(csv_text)
     assert len(rows) == 1
     assert any("重复" in warning for warning in warnings)
 
 
 def test_missing_column_is_reported():
     csv_text = "户号,Q1 设备来源,Q2 自购设备类型\nH1,自购,喷药机\n"
-    definition, warnings, rows, _, _ = parse(csv_text)
+    definition, warnings, rows, _, _, _ = parse(csv_text)
     assert any("Q4" in warning for warning in warnings)
 
 
 def test_unknown_option_is_kept_but_flagged():
     jumps = {"order": ["Q1"], "types": {"Q1": "single"},
              "options": {"Q1": ["自购", "租赁"]}, "jumps": {}}
-    definition, _, rows, _, _ = parse("户号,Q1 设备来源\nH1,丢弃\n", jumps)
+    definition, _, rows, _, _, _ = parse("户号,Q1 设备来源\nH1,丢弃\n", jumps)
     # The value cannot be routed, so it stays on Q1 for the editor to fix.
     stored = importer.to_import_answers(definition, rows)
     assert stored["H1"] == {((), "Q1"): "丢弃"}
@@ -101,7 +101,7 @@ def test_rule_list_shape():
 def test_bare_jump_table_without_order_uses_csv_columns():
     jumps = {"Q1": {"租赁": "Q3"}}
     csv_text = "户号,Q1 来源,Q2 型号,Q3 费用\nH1,租赁,喷药机,100\n"
-    definition, _, rows, _, _ = parse(csv_text, jumps)
+    definition, _, rows, _, _, _ = parse(csv_text, jumps)
     assert [q["id"] for q in definition] == ["Q1", "Q2", "Q3"]
     stored = importer.to_import_answers(definition, rows)["H1"]
     assert stored == {((), "Q1"): "租赁", (("Q1",), "Q3"): "100"}

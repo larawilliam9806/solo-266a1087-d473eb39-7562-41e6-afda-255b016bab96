@@ -133,6 +133,18 @@ ol.questions { list-style: none; padding: 0; margin: 1rem 0; counter-reset: q; }
 
 .question.unanswered { border-left-color: var(--warn-line); background: var(--warn-bg); }
 .question.jump { border-left-style: dashed; }
+.question.refused { border-left-color: #8a6fb0; background: #f4f0fa; }
+
+.refusalnote {
+  font-size: 0.78rem;
+  color: #5c4385;
+  border: 1px solid #c7b6e0;
+  background: #efe8f8;
+  border-radius: 999px;
+  padding: 0 0.5rem;
+}
+
+.clear-refusal { color: var(--muted); font-size: 0.88rem; margin-top: 0.4rem; }
 
 .qhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
 .qid {

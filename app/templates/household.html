@@ -24,13 +24,17 @@
     <ol class="questions">
       {% for step in steps %}
         {% set index = loop.index %}
-        <li class="question {{ 'unanswered' if not step.answered else '' }}
-                              {{ 'jump' if step.jump_origin else '' }}">
+        <li class="question {{ 'unanswered' if not step.answered and not step.refused else '' }}
+                              {{ 'jump' if step.jump_origin else '' }}
+                              {{ 'refused' if step.refused else '' }}">
           <div class="qhead">
             <span class="qid">{{ step.qid }}</span>
             <span class="qtitle">{{ step.title }}</span>
             {% if step.jump_origin %}
               <span class="jumpnote">跳至 {{ step.jump_target }}</span>
+            {% endif %}
+            {% if step.refused %}
+              <span class="refusalnote">拒答，续答 {{ step.refusal_target }}</span>
             {% endif %}
           </div>
           <div class="prefix muted">路径：{{ step.prefix|join(" → ") or "起题" }}</div>
@@ -63,6 +67,14 @@
                 未答
               </label>
             </div>
+            {% if step.refused %}
+              <label class="option clear-refusal">
+                <input type="checkbox" name="r_clear_{{ index }}" value="1">
+                清除拒答记录（本题保持留空，路径在此停止）
+              </label>
+              <div class="warn">本题被拒答，答案留空且不计入已答题数；已按记录从 {{ step.refusal_target }} 续答。
+                补选实际选项即按该选项的跳题规则重新推演，只勾选清除则在此停止。</div>
+            {% endif %}
           {% else %}
             <input type="text" name="v_{{ index }}" value="{{ step.value }}"
                    data-value="{{ step.value }}" class="text-answer"
@@ -98,7 +110,13 @@
         <tr>
           <td>{{ item.qid }} {{ item.title }}</td>
           <td class="route">{{ item.prefix|join(" → ") or "起题" }}</td>
-          <td>{{ item.value }}</td>
+          <td>
+            {% if item.refusal_target %}
+              <span class="refusalnote">拒答，续答 {{ item.refusal_target }}</span>
+            {% else %}
+              {{ item.value }}
+            {% endif %}
+          </td>
         </tr>
       {% endfor %}
     </tbody>

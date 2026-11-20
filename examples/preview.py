@@ -16,7 +16,7 @@ def load():
         raw_csv = handle.read()
     with open(os.path.join(ROOT, "examples", "jumps.json"), "rb") as handle:
         raw_json = handle.read()
-    definition, warnings, rows, _, _ = importer.parse(raw_csv, raw_json)
+    definition, warnings, rows, _, _, _ = importer.parse(raw_csv, raw_json)
     return definition, warnings, rows
 
 
@@ -34,13 +34,17 @@ def main():
 
     print("\n各户当前路径：")
     answers = importer.to_import_answers(definition, rows)
+    refusals = importer.to_import_refusals(rows)
     for row in rows:
         stored = answers[row["household_no"]]
-        steps = engine.walk_stored(definition, stored)
+        row_refusals = refusals.get(row["household_no"])
+        steps = engine.walk_stored(definition, stored, refusals=row_refusals)
         missing = engine.first_missing(steps)
-        print("  %-5s %-32s 首个漏答: %s" % (
+        refused = [step["qid"] for step in steps if step.get("refused")]
+        print("  %-5s %-32s 首个漏答: %-4s 拒答: %s" % (
             row["household_no"], " → ".join(engine.route(steps)),
-            missing["qid"] if missing else "无"))
+            missing["qid"] if missing else "无",
+            "、".join(refused) if refused else "无"))
 
     print("\n示例 JSON：")
     print(json.dumps(

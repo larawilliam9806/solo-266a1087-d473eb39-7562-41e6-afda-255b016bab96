@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     definition TEXT NOT NULL,
+    has_refusals INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -30,7 +31,20 @@ CREATE TABLE IF NOT EXISTS answers (
     value TEXT NOT NULL,
     PRIMARY KEY (household_id, prefix, qid)
 );
+
+CREATE TABLE IF NOT EXISTS refusals (
+    household_id INTEGER NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    prefix TEXT NOT NULL,
+    qid TEXT NOT NULL,
+    target_qid TEXT NOT NULL,
+    PRIMARY KEY (household_id, prefix, qid)
+);
 """
+
+# Column added later; applied to databases created before refusals existed.
+_MIGRATIONS = (
+    "ALTER TABLE batches ADD COLUMN has_refusals INTEGER NOT NULL DEFAULT 0",
+)
 
 
 def connect(path):
@@ -38,6 +52,13 @@ def connect(path):
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(SCHEMA)
+    existing = {row["name"] for row in connection.execute(
+        "PRAGMA table_info(batches)")}
+    for statement in _MIGRATIONS:
+        column = statement.split("ADD COLUMN")[1].split()[0]
+        if column not in existing:
+            connection.execute(statement)
+    connection.commit()
     return connection
 
 
@@ -68,17 +89,23 @@ def _prefix_tuple(key):
     return tuple(str(item) for item in value)
 
 
-def create_batch(connection, name, definition, households, answers_by_household):
+def create_batch(connection, name, definition, households,
+                 answers_by_household, refusals_by_household=None,
+                 has_refusals=False):
     """Insert a batch in one transaction.
 
     ``households`` is a list of ``(household_no, row_number)``.
     ``answers_by_household`` maps household_no to
-    ``{(prefix_tuple, qid): value}``.
+    ``{(prefix_tuple, qid): value}``; ``refusals_by_household`` maps it to
+    ``{(prefix_tuple, qid): (source_qid, target_qid)}``.
     """
+    refusals_by_household = refusals_by_household or {}
     with transaction(connection):
         cursor = connection.execute(
-            "INSERT INTO batches (name, definition) VALUES (?, ?)",
-            (name, json.dumps(definition, ensure_ascii=False)))
+            "INSERT INTO batches (name, definition, has_refusals) "
+            "VALUES (?, ?, ?)",
+            (name, json.dumps(definition, ensure_ascii=False),
+             1 if has_refusals else 0))
         batch_id = cursor.lastrowid
         for household_no, row_number in households:
             cursor = connection.execute(
@@ -94,6 +121,15 @@ def create_batch(connection, name, definition, households, answers_by_household)
             connection.executemany(
                 "INSERT OR REPLACE INTO answers "
                 "(household_id, prefix, qid, value) VALUES (?, ?, ?, ?)", rows)
+            refusal_rows = [
+                (household_id, _prefix_key(prefix), qid, pair[1])
+                for (prefix, qid), pair in
+                refusals_by_household.get(household_no, {}).items()
+            ]
+            connection.executemany(
+                "INSERT OR REPLACE INTO refusals "
+                "(household_id, prefix, qid, target_qid) "
+                "VALUES (?, ?, ?, ?)", refusal_rows)
     return batch_id
 
 
@@ -106,6 +142,7 @@ def get_batch(connection, batch_id):
         "id": row["id"],
         "name": row["name"],
         "definition": json.loads(row["definition"]),
+        "has_refusals": bool(row["has_refusals"]),
         "created_at": row["created_at"],
     }
 
@@ -141,12 +178,22 @@ def load_answers(connection, household_id):
             for row in rows}
 
 
-def save_answers(connection, household_id, changes):
+def load_refusals(connection, household_id):
+    """Refusal records as ``{(prefix_tuple, qid): (qid, target_qid)}``."""
+    rows = connection.execute(
+        "SELECT prefix, qid, target_qid FROM refusals "
+        "WHERE household_id = ?", (household_id,)).fetchall()
+    return {(_prefix_tuple(row["prefix"]), row["qid"]):
+            (row["qid"], row["target_qid"]) for row in rows}
+
+
+def save_answers(connection, household_id, changes, refusal_changes=None):
     """Persist ``{key: value_or_None}`` for one household.
 
-    ``key`` is ``(prefix_tuple, qid)``; ``None`` deletes.  All changes are
-    written in a single transaction, so a failure leaves the previous answers
-    fully intact.
+    ``key`` is ``(prefix_tuple, qid)``; ``None`` deletes.  ``refusal_changes``
+    holds refusal deletions (the editor never creates new refusals).  All
+    changes are written in a single transaction, so a failure leaves the
+    previous answers and refusal records fully intact.
     """
     with transaction(connection):
         for (prefix, qid), value in changes.items():
@@ -163,6 +210,11 @@ def save_answers(connection, household_id, changes):
                     "ON CONFLICT (household_id, prefix, qid) "
                     "DO UPDATE SET value = excluded.value",
                     (household_id, key, qid, value))
+        for (prefix, qid) in (refusal_changes or {}):
+            connection.execute(
+                "DELETE FROM refusals WHERE household_id = ? "
+                "AND prefix = ? AND qid = ?",
+                (household_id, _prefix_key(prefix), qid))
 
 
 def db_path_from_env():

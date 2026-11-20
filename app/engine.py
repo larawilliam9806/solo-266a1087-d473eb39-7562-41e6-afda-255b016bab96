@@ -20,10 +20,16 @@ restored as soon as the walk returns to that route.
 
 from __future__ import annotations
 
+import re
+
 SINGLE = "single"
 TEXT = "text"
 NUMBER = "number"
 TYPES = (SINGLE, TEXT, NUMBER)
+
+# A refusal cell looks like ``Q1>Q5``: Q1 was refused (left blank) and the
+# interview continued at Q5.  A full-width greater-than sign is accepted too.
+REFUSAL_PATTERN = re.compile(r"[>＞]")
 
 _JUMP_KEYS = ("jumps", "jump", "跳转", "跳题", "跳题表", "跳转表")
 _ANSWER_KEYS = ("answer", "option", "value", "label", "选项", "答案")
@@ -399,7 +405,7 @@ def _jump_target(question, value):
     return (question.get("jumps") or {}).get(str(value).strip())
 
 
-def walk(definition, getter, start=0):
+def walk(definition, getter, start=0, refusals=None):
     """Walk the questionnaire using ``getter(question_id, prefix)``.
 
     A blank/missing answer stops the walk; the stopping question is included
@@ -408,6 +414,10 @@ def walk(definition, getter, start=0):
     table specifies one, otherwise with the next question in order.
     ``invalid`` flags single answers outside the option list (dirty data, kept
     for review).
+
+    ``refusals`` maps ``(prefix, qid)`` to ``(source_qid, target_qid)``: when
+    the walk reaches such a blank single-choice question it does not stop but
+    resumes at the recorded target, marking the step with ``refused`` true.
     """
     index = index_of(definition)
     steps = []
@@ -436,9 +446,24 @@ def walk(definition, getter, start=0):
                         and value not in options),
             "jump_origin": False,
             "jump_target": None,
+            "refused": False,
+            "refusal_target": None,
         }
         steps.append(step)
         if not answered:
+            # A recorded refusal only applies to this exact path question: the
+            # blank single-choice question is skipped and the walk resumes at
+            # the recorded next question, instead of stopping like a plain
+            # blank answer.
+            refusal = (refusals or {}).get((tuple(prefix), qid))
+            if refusal is not None and question.get("type") == SINGLE:
+                target = refusal[1]
+                if target in index:
+                    step["refused"] = True
+                    step["refusal_target"] = target
+                    position = index[target]
+                    prefix.append(qid)
+                    continue
             break
         target = _jump_target(question, value)
         if target:
@@ -451,14 +476,16 @@ def walk(definition, getter, start=0):
     return steps
 
 
-def walk_plain(definition, answers):
-    return walk(definition, lambda qid, prefix: (answers or {}).get(qid))
+def walk_plain(definition, answers, refusals=None):
+    return walk(definition, lambda qid, prefix: (answers or {}).get(qid),
+                refusals=refusals)
 
 
-def walk_stored(definition, stored):
+def walk_stored(definition, stored, refusals=None):
     """Walk using answers keyed by ``(prefix, question_id)``."""
     return walk(definition,
-                lambda qid, prefix: (stored or {}).get((prefix, qid)))
+                lambda qid, prefix: (stored or {}).get((prefix, qid)),
+                refusals=refusals)
 
 
 def route(steps):
@@ -466,30 +493,96 @@ def route(steps):
 
 
 def first_missing(steps):
+    # A refused question is intentionally blank: it never counts as the first
+    # unanswered question (the walk continues past it).
     for step in steps:
-        if not step["answered"]:
+        if not step["answered"] and not step.get("refused"):
             return step
     return None
 
 
-def import_row(definition, answers):
+def parse_refusal(text):
+    """Parse a ``Q1>Q5`` cell into ``("Q1", "Q5")`` or raise.
+
+    Blank cells mean "no refusal" and return ``None``.
+    """
+    if is_blank(text):
+        return None
+    cleaned = str(text).strip()
+    parts = [part.strip() for part in REFUSAL_PATTERN.split(cleaned)]
+    if len(parts) != 2 or not parts[0] or not parts[1] or \
+            any(REFUSAL_PATTERN.search(part) for part in parts):
+        raise DefinitionError("拒答续答格式应为「题号>题号」，如 Q1>Q5")
+    return parts[0], parts[1]
+
+
+def validate_refusal(definition, answers, pair):
+    """Validate one ``(source_qid, target_qid)`` refusal for a CSV row.
+
+    The source must be a single-choice question that the normal walk actually
+    reaches with a blank answer, and the target must be the next question of
+    one of its legal options (an explicit jump target, or the following
+    question when the option has no jump).
+
+    Returns the ``(prefix_tuple, source_qid)`` storage key of the refusal.
+    """
+    source, target = pair
+    index = index_of(definition)
+    if source not in index:
+        raise DefinitionError("拒答题 %s 不在问卷中" % source)
+    question = definition[index[source]]
+    if question.get("type") != SINGLE:
+        raise DefinitionError("拒答题 %s 不是单选题" % source)
+    if target not in index:
+        raise DefinitionError("拒答续答的去向 %s 不在问卷中" % target)
+    if not is_blank(answers.get(source)):
+        raise DefinitionError("拒答题 %s 的答案格必须留空" % source)
+
+    steps = walk_plain(definition, answers)
+    reached = next((step for step in steps if step["qid"] == source), None)
+    if reached is None or reached["answered"]:
+        raise DefinitionError("拒答题 %s 不是按原规则走到的题" % source)
+
+    legal = set(question.get("jumps") or {})
+    position = index[source]
+    next_in_order = (definition[position + 1]["id"]
+                     if position + 1 < len(definition) else None)
+    for option in question.get("options") or []:
+        legal.add((question.get("jumps") or {}).get(option)
+                  or next_in_order)
+    legal.discard(None)
+    if target not in legal:
+        raise DefinitionError(
+            "拒答续答 %s>%s 的去向不是 %s 合法选项的下一题"
+            % (source, target, source))
+    return reached["prefix"], source
+
+
+def import_row(definition, answers, refusals=None):
     """Store answers for one imported CSV row.
 
     Only questions actually reached by the walk are kept.  The walk ends at
     the first blank answer, so values after it (and on questions skipped by
-    a jump) are not imported at all.
+    a jump) are not imported at all.  When a refusal record applies, the
+    refused question is left blank and the walk resumes at its recorded next
+    question; later plain blank answers still stop the walk as usual.
     """
-    steps = walk_plain(definition, answers)
+    steps = walk_plain(definition, answers, refusals=refusals)
     stored = {}
     for step in steps:
         if not step["answered"]:
+            # A refused question stays blank but does not end the import: the
+            # walk has already resumed at the recorded next question.
+            if step.get("refused"):
+                continue
             break
         stored[(step["prefix"], step["qid"])] = step["value"]
     return steps, stored
 
 
-def plan_changes(definition, stored, submitted):
-    """Storage changes for one submitted edit form.
+def plan_household_changes(definition, stored, submitted, refusals=None,
+                           clear_refusals=None):
+    """Storage changes for one submitted edit form, including refusals.
 
     ``submitted`` is an ordered list of ``(question_id, prefix, value)``
     triples, where ``prefix`` is the question sequence the form was rendered
@@ -506,17 +599,30 @@ def plan_changes(definition, stored, submitted):
     The walk is recomputed after every accepted value, using the edited
     answers.  A blank value deletes the answer for that exact path only.
 
-    Returns ``(changes, ignored, routes)`` where ``changes`` maps
-    ``(prefix_tuple, qid)`` to a value, or to ``None`` for a deletion, and
-    ``routes`` lists the question ids submitted but not reached.
+    ``refusals`` maps ``(prefix, qid)`` to ``(source_qid, target_qid)`` and
+    carries the recorded refusals currently stored for the household.  A
+    refused question is rendered blank; filling its radio (or submitting any
+    non-blank value) consumes the refusal and routes by the chosen option.
+    Keys listed in ``clear_refusals`` delete the record while leaving the
+    question blank, so the walk stops there.  Refusals on paths the current
+    walk does not reach stay untouched (and reappear when the path returns).
+
+    Returns ``(changes, ignored, refusal_changes)`` where ``changes`` maps
+    ``(prefix_tuple, qid)`` to a value (or ``None`` for a deletion),
+    ``refusal_changes`` maps refusal keys to ``None`` for deletions, and
+    ``ignored`` lists the question ids submitted but not reached.
     """
     staged = dict(stored)
+    staged_refusals = dict(refusals or {})
     pending = {}
     for qid, prefix, value in submitted:
         prefix = tuple(prefix)
         pending[(prefix, str(qid))] = "" if value is None else str(value)
+    clears = {(tuple(prefix), qid)
+              for prefix, qid in (clear_refusals or ())}
     accepted = set()
     changes = {}
+    refusal_changes = {}
 
     prefix = []
     position = 0
@@ -545,21 +651,56 @@ def plan_changes(definition, stored, submitted):
                 if old != value:
                     staged[key] = value
                     changes[key] = value
+            if value != "":
+                # Filling the previously refused question consumes the
+                # refusal and routes by the option actually chosen.
+                if key in staged_refusals:
+                    del staged_refusals[key]
+                    refusal_changes[key] = None
+            elif key in clears and key in staged_refusals:
+                # The explicit "clear record" checkbox: the question stays
+                # blank, so the walk stops here from now on.
+                del staged_refusals[key]
+                refusal_changes[key] = None
             accepted.add(key)
+        elif key in clears and key in staged_refusals:
+            del staged_refusals[key]
+            refusal_changes[key] = None
         value = staged.get(key)
         value = "" if is_blank(value) else str(value).strip()
         if not value:
+            refusal = staged_refusals.get(key)
+            if refusal is not None and question.get("type") == SINGLE \
+                    and refusal[1] in index:
+                position = index[refusal[1]]
+                prefix.append(qid)
+                continue
             break
         target = _jump_target(question, value)
         position = index[target] if target else position + 1
         prefix.append(qid)
 
+    # Refusal records on paths the current walk does not reach are never
+    # touched: they reappear, with their later answers, when the walk returns
+    # to that path.
     ignored = [key[1] for key in pending if key not in accepted]
+    return changes, ignored, refusal_changes
+
+
+def plan_changes(definition, stored, submitted):
+    """Backwards-compatible wrapper without refusal handling."""
+    changes, ignored, _ = plan_household_changes(
+        definition, stored, submitted)
     return changes, ignored
 
 
-def other_path_answers(definition, stored, active_steps):
-    """Saved answers that are not on the active path (for transparency)."""
+def other_path_answers(definition, stored, active_steps, refusals=None):
+    """Saved answers that are not on the active path (for transparency).
+
+    Dormant refusal records (on paths the current walk does not reach) are
+    listed too, so an interviewer switching branches can see that a recorded
+    refusal still exists and will come back when the path returns.
+    """
     active = {(step["prefix"], step["qid"]) for step in active_steps}
     by_qid = {question["id"]: question for question in definition}
     out = []
@@ -571,6 +712,18 @@ def other_path_answers(definition, stored, active_steps):
             "title": by_qid[qid].get("title", qid),
             "prefix": prefix,
             "value": value,
+            "refusal_target": None,
+        })
+    for key, pair in (refusals or {}).items():
+        prefix, qid = key
+        if (prefix, qid) in active or qid not in by_qid:
+            continue
+        out.append({
+            "qid": qid,
+            "title": by_qid[qid].get("title", qid),
+            "prefix": prefix,
+            "value": "",
+            "refusal_target": pair[1],
         })
     out.sort(key=lambda item: (item["qid"], item["prefix"]))
     return out

@@ -11,6 +11,7 @@ import engine
 
 HOUSEHOLD_HEADERS = ("户号", "户编号", "户主编号", "农户编号", "household_no",
                      "household", "household_id")
+REFUSAL_HEADER = "拒答续答"
 _SEPARATORS = re.compile(r"[\s:：、，,|/\\\-—_（(]+")
 _ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk")
 
@@ -106,6 +107,9 @@ def parse(raw_csv, raw_json, household_column=None):
     if not any(headers):
         raise ImportError_("CSV 表头为空")
 
+    refusal_position = next(
+        (position for position, header in enumerate(headers)
+         if header == REFUSAL_HEADER), None)
     household_position = (find_household_column(headers)
                           if household_column in (None, "")
                           else int(household_column))
@@ -126,14 +130,16 @@ def parse(raw_csv, raw_json, household_column=None):
     else:
         columns = []
         for position, header in enumerate(headers):
-            if position == household_position:
+            if position == household_position or \
+                    position == refusal_position:
                 continue
             key, title = header_key(header)
             columns.append({"id": key or title, "title": title})
 
     column_map = {}
     for position, header in enumerate(headers):
-        if position == household_position:
+        if position == household_position or \
+                position == refusal_position:
             continue
         qid = question_id_for_header(header, columns)
         if qid is None:
@@ -168,10 +174,16 @@ def parse(raw_csv, raw_json, household_column=None):
                 observed.setdefault(qid, [])
                 if cell not in observed[qid]:
                     observed[qid].append(cell)
+        refusal_cell = ""
+        if refusal_position is not None:
+            refusal_cell = (raw_row[refusal_position]
+                            if refusal_position < len(raw_row)
+                            else "").strip()
         parsed_rows.append({
             "household_no": household_no,
             "row_number": row_number,
             "answers": answers,
+            "refusal_cell": refusal_cell,
         })
 
     if not parsed_rows:
@@ -193,13 +205,52 @@ def parse(raw_csv, raw_json, household_column=None):
             raise ImportError_(str(error))
         warnings.extend(build_warnings)
 
-    return definition, warnings, parsed_rows, household_position, headers
+    if refusal_position is not None:
+        # Every recorded refusal is checked against the routing rules; one bad
+        # record rejects the whole batch and nothing is stored.
+        for row in parsed_rows:
+            cell = row.get("refusal_cell") or ""
+            if not cell:
+                continue
+            try:
+                pair = engine.parse_refusal(cell)
+                prefix, source = engine.validate_refusal(
+                    definition, row["answers"], pair)
+            except engine.DefinitionError as error:
+                raise ImportError_(
+                    "户号 %s 的拒答续答有误：%s"
+                    % (row["household_no"], error))
+            row["refusal_key"] = (tuple(prefix), source)
+            row["refusal_pair"] = pair
+
+    return (definition, warnings, parsed_rows, household_position,
+            headers, refusal_position is not None)
 
 
 def to_import_answers(definition, rows):
     """Key answers by ``(prefix, qid)`` using the routing rules."""
     stored = {}
     for row in rows:
-        _, answers = engine.import_row(definition, row["answers"])
+        refusals = _row_refusals(row)
+        _, answers = engine.import_row(
+            definition, row["answers"], refusals=refusals)
         stored[row["household_no"]] = answers
     return stored
+
+
+def _row_refusals(row):
+    key = row.get("refusal_key")
+    pair = row.get("refusal_pair")
+    if not key or not pair:
+        return None
+    return {(tuple(key[0]), key[1]): (pair[0], pair[1])}
+
+
+def to_import_refusals(rows):
+    """Refusal records keyed by household_no and ``(prefix, qid)``."""
+    refusals_by_household = {}
+    for row in rows:
+        refusals = _row_refusals(row)
+        if refusals:
+            refusals_by_household[row["household_no"]] = refusals
+    return refusals_by_household
