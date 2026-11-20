@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · 果园设备调查{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>{{ title }}</h1>
+  <div class="flash error">{{ message }}</div>
+  {% if detail %}<p class="muted">{{ detail }}</p>{% endif %}
+  <p><a class="button secondary" href="{{ url_for('index') }}">返回首页</a></p>
+</section>
+{% endblock %}

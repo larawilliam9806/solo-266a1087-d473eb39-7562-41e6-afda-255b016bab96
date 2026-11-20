@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}户 {{ household.household_no }} · 果园设备调查{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="row">
+    <div>
+      <p class="muted"><a href="{{ url_for('batch', batch_id=batch.id) }}">← 返回 {{ batch.name }}</a></p>
+      <h1>户号 {{ household.household_no }}</h1>
+      <p class="muted">当前路径：
+        {% for step in steps %}
+          <span class="chip">{{ step.qid }}</span>{% if not loop.last %} → {% endif %}
+        {% endfor %}
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>逐题改答</h2>
+  <p class="muted">改动前面的单选题后提交，路径会按跳题规则重新推演；新路径上没有填过的题会显示为空，
+    原有路径上保存的答案不会丢失，切回该路径时会恢复。</p>
+  <form id="edit-form" method="post"
+        action="{{ url_for('save_household', batch_id=batch.id, household_id=household.id) }}">
+    <ol class="questions">
+      {% for step in steps %}
+        {% set index = loop.index %}
+        <li class="question {{ 'unanswered' if not step.answered else '' }}
+                              {{ 'jump' if step.jump_origin else '' }}">
+          <div class="qhead">
+            <span class="qid">{{ step.qid }}</span>
+            <span class="qtitle">{{ step.title }}</span>
+            {% if step.jump_origin %}
+              <span class="jumpnote">跳至 {{ step.jump_target }}</span>
+            {% endif %}
+          </div>
+          <div class="prefix muted">路径：{{ step.prefix|join(" → ") or "起题" }}</div>
+          <input type="hidden" name="k_qid_{{ index }}" value="{{ step.qid }}">
+          <input type="hidden" name="k_prefix_{{ index }}"
+                 value="{{ step.prefix|tojson|forceescape }}">
+          {% if step.type == "single" %}
+            <div class="options">
+              {% for option in step.options %}
+                <label class="option">
+                  <input type="radio" name="v_{{ index }}"
+                         value="{{ option }}"
+                         data-value="{{ option }}"
+                         {% if step.value == option %}checked{% endif %}>
+                  {{ option }}
+                </label>
+              {% endfor %}
+              {% if step.invalid and step.value %}
+                <label class="option">
+                  <input type="radio" name="v_{{ index }}"
+                         value="{{ step.value }}" data-value="{{ step.value }}"
+                         checked>
+                  {{ step.value }}（原值）
+                </label>
+              {% endif %}
+              <label class="option clear">
+                <input type="radio" name="v_{{ index }}" value=""
+                       data-value=""
+                       {% if not step.value %}checked{% endif %}>
+                未答
+              </label>
+            </div>
+          {% else %}
+            <input type="text" name="v_{{ index }}" value="{{ step.value }}"
+                   data-value="{{ step.value }}" class="text-answer"
+                   placeholder="未答">
+          {% endif %}
+          {% if step.invalid %}
+            <div class="warn">现有答案「{{ step.value }}」不在选项中，未参与跳题，请重新选择。</div>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ol>
+
+    {% if missing %}
+      <div class="flash warning">首个漏答题：<strong>{{ missing.qid }} {{ missing.title }}</strong></div>
+    {% else %}
+      <div class="flash success">当前路径已答完。</div>
+    {% endif %}
+
+    <button type="submit">保存</button>
+    <a class="button secondary" href="{{ url_for('export_csv', batch_id=batch.id) }}">下载分析用 CSV</a>
+  </form>
+  <p class="muted">提示：切换前面的单选题后，请先保存再用新路径继续填写；未保存的输入不会跟随路径移动。</p>
+</section>
+
+{% if others %}
+<section class="card">
+  <h2>其他路径上保存的答案</h2>
+  <p class="muted">这些答案不属于当前路径，不会出现在下载的分析表里；切回对应路径时会恢复。</p>
+  <table>
+    <thead><tr><th>题目</th><th>路径</th><th>答案</th></tr></thead>
+    <tbody>
+      {% for item in others %}
+        <tr>
+          <td>{{ item.qid }} {{ item.title }}</td>
+          <td class="route">{{ item.prefix|join(" → ") or "起题" }}</td>
+          <td>{{ item.value }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

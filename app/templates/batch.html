@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ batch.name }} · 果园设备调查{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="row">
+    <div>
+      <h1>{{ batch.name }}</h1>
+      <p class="muted">导入于 {{ batch.created_at }} · 共 {{ households|length }} 户 ·
+        {{ question_count }} 道题</p>
+    </div>
+    <div class="actions">
+      <a class="button" href="{{ url_for('export_csv', batch_id=batch.id) }}">下载分析用 CSV</a>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>户号</th><th>当前路径</th><th>已答</th><th>首个漏答题</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in households %}
+        <tr>
+          <td class="strong">{{ item.household_no }}</td>
+          <td class="route">{{ item.route|join(" → ") }}</td>
+          <td>{{ item.answered }}</td>
+          <td>
+            {% if item.missing %}
+              <span class="badge missing">{{ item.missing }}</span>
+            {% else %}
+              <span class="badge ok">无</span>
+            {% endif %}
+          </td>
+          <td>
+            <a href="{{ url_for('household', batch_id=batch.id, household_id=item.id) }}">改答</a>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}导入答卷 · 果园设备调查{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>导入答卷</h1>
+  <p class="muted">上传带户号的答卷 CSV 和 JSON 跳题表。导入时按跳题规则推演每户路径，
+    只采用走到题目上的答案；第一条空答之后的值会被忽略。</p>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+    <label>答卷 CSV
+      <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    </label>
+    <label>JSON 跳题表
+      <input type="file" name="json_file" accept=".json,application/json" required>
+    </label>
+    <label>批次名称（可选）
+      <input type="text" name="batch_name" placeholder="默认使用 CSV 文件名">
+    </label>
+    <button type="submit">导入</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>已有批次</h2>
+  {% if batches %}
+    <table>
+      <thead>
+        <tr><th>批次</th><th>户数</th><th>导入时间</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for item in batches %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ item.households }}</td>
+            <td>{{ item.created_at }}</td>
+            <td>
+              <a href="{{ url_for('batch', batch_id=item.id) }}">查看</a>
+              <a href="{{ url_for('export_csv', batch_id=item.id) }}">下载 CSV</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">还没有批次。</p>
+  {% endif %}
+</section>
+{% endblock %}
